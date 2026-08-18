@@ -455,6 +455,34 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /*
+     * Avoid race condition with shared lock:
+     *
+     * Without LOCK_SH:
+     * Process B detects dead daemon, gets exclusive lock LOCK_EX and enters
+     * routine to find a survivor. It finds process A as survivor.
+     * Simultaneously, process C spawns as child of A in the namespaces.
+     * C reads the .inum files, sees match and takes the fast path and
+     * registers. But the registration was too late so B cannot consider C.
+     * Now A dies and B tries to pin the namespaces of A but fails because
+     * A died. B concludes it needs to spawn a new daemon that creates new
+     * user and ipc namespaces, even though C stills runs in the original ns.
+     * The inum and pid files are overwritten and all subsequent unipc processes
+     * will join the new namespaces and C is left separated from the rest.
+     *
+     * With LOCK_SH:
+     * A process that enters the "daemon setup" section secured with LOCK_EX
+     * will block all processes trying to acquire the shared lock LOCK_SH.
+     * Only if no process "modifies" state like inum and pid files (no one
+     * holding LOCK_EX), multiple other processes can safely enter and try
+     * the fast path concurrently. In above example, after B spawned the new
+     * daemon, it will release LOCK_EX. Only now, process C can move on and
+     * acquire the shared lock. When C reads the .inum files, it sees a
+     * mismatch and must join the new namespaces. In the "happy case" where
+     * the daemon is just running, these shared locks have nearly zero
+     * performance impact because without some process holding LOCK_EX,
+     * acquiring the shared locks will succeed directly without blocking.
+     */
     int lock_fd = open(lock_file, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lock_fd < 0)
     {
@@ -492,8 +520,14 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
-            /* O_CLOEXEC ensures lock_fd is closed on exec */
+            /*
+             * O_CLOEXEC ensures lock_fd is closed on exec but make it explicit
+             */
+            flock(lock_fd, LOCK_UN);
+            close(lock_fd);
+
             execvp(argv[1], &argv[1]);
+
             perror("execvp (Fast path failed)");
             return EXIT_FAILURE;
         }
@@ -507,10 +541,6 @@ int main(int argc, char *argv[])
         close(fd_ipc_ns_inum);
     }
 
-    /* Fast path failed: release shared lock */
-    flock(lock_fd, LOCK_UN);
-    close(lock_fd);
-
     pid_t pid_daemon = -1;
     int fd_user_ns = -1;
     int fd_ipc_ns = -1;
@@ -523,20 +553,18 @@ int main(int argc, char *argv[])
          * ns of an existing unipc survivor process or unshares to create new
          * user and ipc ns.
          */
-        int lock_fd = open(lock_file, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        if (lock_fd < 0)
-        {
-            fprintf(stderr, "Could not open lock file\n");
-            return EXIT_FAILURE;
-        }
+
+        /*
+         * Releasing shared lock is necessary before upgrading the lock to EX
+         */
+        flock(lock_fd, LOCK_UN);
+
         if (flock(lock_fd, LOCK_EX) != 0)
         {
             fprintf(stderr, "Could not acquire lock file\n");
             close(lock_fd);
             return EXIT_FAILURE;
         }
-
-        /* Critical section starts */
 
         /*
          * Double-check if there is an existing daemon. Necessary because
@@ -858,11 +886,6 @@ int main(int argc, char *argv[])
                 }
             }
         }
-
-        flock(lock_fd, LOCK_UN);
-        close(lock_fd);
-
-        /* Critical section ends */
     }
 
     /*
@@ -873,6 +896,8 @@ int main(int argc, char *argv[])
         perror("Failed to join user namespace");
         close(fd_user_ns);
         close(fd_ipc_ns);
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
         return EXIT_FAILURE;
     }
     close(fd_user_ns);
@@ -889,6 +914,8 @@ int main(int argc, char *argv[])
     {
         perror("Failed to join ipc namespace");
         close(fd_ipc_ns);
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
         return EXIT_FAILURE;
     }
     close(fd_ipc_ns);
@@ -896,8 +923,36 @@ int main(int argc, char *argv[])
     if (register_current_process(processes_dir) != 0)
     {
         fprintf(stderr, "Failed to register process\n");
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
         return EXIT_FAILURE;
     }
+
+    /*
+     * Avoid race condition with lock:
+     *
+     * The lock, either SH or EX, is hold on purpose until registration the
+     * process finishes.
+     *
+     * Release before registration:
+     * Process A holds SH, fails fast path and successfully obtains the fds
+     * for the namespaces of the running daemon. A successfully joins the
+     * namespaces but has not registered yet. Now the daemon crashes.
+     * Process B starts and holds SH, fails fast path, fails to obtain the fds
+     * because the daemon is down so it upgrades to EX. Because A has not
+     * already registered, B finds no survivor and decides to spawn a new
+     * daemon. The inum files are updated so subsequent processes will join
+     * the namespaces of the new daemon. A registers now but executes in the
+     * old namespaces.
+     *
+     * Release after registration:
+     * B blocks on waiting for EX until A registers and releases SH.
+     * B will find A in the list of registered processes as survivor.
+     * B will spawn a new daemon which will join the namespaces of A.
+     */
+    flock(lock_fd, LOCK_UN);
+    close(lock_fd);
+
     /*
      * "If a process with nonzero UID in this user namespace performs execve,
      * all its capabilities are cleared." (man 7 capabilities)
