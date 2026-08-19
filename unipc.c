@@ -298,7 +298,7 @@ int cleanup_and_find_survivor(const char *processes_dir,
         snprintf(file_path, sizeof(file_path), "%s/%s", processes_dir,
                  ent->d_name);
 
-        if (kill(pid, 0) != 0 || get_process_starttime(pid) != stored_starttime)
+        if (kill(pid, 0) != 0)
         {
             unlink(file_path);
             continue;
@@ -325,9 +325,22 @@ int cleanup_and_find_survivor(const char *processes_dir,
                 ssize_t len_cand_ipc =
                     readlink(path_ns, cand_ipc, sizeof(cand_ipc) - 1);
 
+                /*
+                 * Avoid race condition:
+                 *
+                 * Checking starttime before pinning /proc/<pid>/ns/ files:
+                 * Start time matches but before the ns files can be pinned,
+                 * the process dies and the pid is reused for another process.
+                 * Now wrong ns files would be opened/pinned. Due to the
+                 * explicit check for the inums here, this would not be a
+                 * problem because the new daemon still joins the correct
+                 * namespaces but this would break the unipc-managed process
+                 * logic.
+                 */
                 if (len_cand_user > 0 && len_cand_ipc > 0 &&
                     strcmp(cand_user, target_user_ns_inum) == 0 &&
-                    strcmp(cand_ipc, target_ipc_ns_inum) == 0)
+                    strcmp(cand_ipc, target_ipc_ns_inum) == 0 &&
+                    get_process_starttime(pid) == stored_starttime)
                 {
                     *fd_user_ns = fd_u;
                     *fd_ipc_ns = fd_i;
@@ -337,6 +350,7 @@ int cleanup_and_find_survivor(const char *processes_dir,
                 {
                     close(fd_u);
                     close(fd_i);
+                    unlink(file_path);
                 }
             }
             else
@@ -349,12 +363,50 @@ int cleanup_and_find_survivor(const char *processes_dir,
                 {
                     close(fd_i);
                 }
+                unlink(file_path);
             }
         }
     }
 
     closedir(dir);
     return survivor_pid;
+}
+
+void cleanup_processes(const char *processes_dir)
+{
+    DIR *dir = opendir(processes_dir);
+    if (!dir)
+    {
+        return;
+    }
+
+    struct dirent *ent;
+
+    while ((ent = readdir(dir)) != NULL)
+    {
+        if (ent->d_name[0] == '.')
+        {
+            continue;
+        }
+
+        pid_t pid = 0;
+        unsigned long long stored_starttime = 0;
+        if (sscanf(ent->d_name, "%d-%llu", &pid, &stored_starttime) != 2)
+        {
+            continue;
+        }
+
+        char file_path[PATH_MAX];
+        snprintf(file_path, sizeof(file_path), "%s/%s", processes_dir,
+                 ent->d_name);
+
+        if (kill(pid, 0) != 0 || get_process_starttime(pid) != stored_starttime)
+        {
+            unlink(file_path);
+        }
+    }
+
+    closedir(dir);
 }
 
 int main(int argc, char *argv[])
@@ -684,7 +736,8 @@ int main(int argc, char *argv[])
 
                     while (1)
                     {
-                        pause();
+                        sleep(300);
+                        cleanup_processes(processes_dir);
                     }
                     _exit(EXIT_SUCCESS);
                 }
@@ -856,11 +909,15 @@ int main(int argc, char *argv[])
                     close(sync_pipe[1]);
 
                     /*
-                     * Sleep forever in the kernel holding the namespaces open
+                     * Sleep forever in the kernel holding the namespaces open.
+                     * Do cleanup in 5 minute interval to ensure the directory
+                     * is cleaned up and no unipc process needs to do cleanup
+                     * logic as overhead (except the daemon itself is down).
                      */
                     while (1)
                     {
-                        pause();
+                        sleep(300);
+                        cleanup_processes(processes_dir);
                     }
                     _exit(EXIT_SUCCESS);
                 }
