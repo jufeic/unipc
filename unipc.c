@@ -597,6 +597,34 @@ int main(int argc, char *argv[])
         close(fd_ipc_ns_inum);
     }
 
+    /*
+     * Safety restriction:
+     *
+     * Even though I think its possible to run unipc inside nested user
+     * namespaces, this use case is not tested enough to fully trust it at the
+     * moment.
+     */
+    char initial_user_ns_inum[256] = {0};
+    char initial_ipc_ns_inum[256] = {0};
+    ssize_t len_initial_user_ns_inum =
+        readlink("/proc/1/ns/user", initial_user_ns_inum,
+                 sizeof(initial_user_ns_inum) - 1);
+    ssize_t len_initial_ipc_ns_inum = readlink(
+        "/proc/1/ns/ipc", initial_ipc_ns_inum, sizeof(initial_ipc_ns_inum) - 1);
+    if (len_initial_user_ns_inum <= 0 || len_initial_ipc_ns_inum <= 0)
+    {
+        fprintf(stderr, "Failed to determine initial namespace inums\n");
+        return EXIT_FAILURE;
+    }
+    else if (strcmp(current_user_ns_inum, initial_user_ns_inum) != 0 ||
+             strcmp(current_ipc_ns_inum, initial_ipc_ns_inum) != 0)
+    {
+        fprintf(stderr,
+                "Executing unipc from a user or ipc namespace different from "
+                "the initial or unipc namespaces is currently not supported\n");
+        return EXIT_FAILURE;
+    }
+
     pid_t pid_daemon = -1;
     int fd_user_ns = -1;
     int fd_ipc_ns = -1;
