@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -125,7 +126,7 @@ unsigned long long get_process_starttime(pid_t pid)
 
     while (token != NULL)
     {
-        /* 'starttime' value is the 22nd field */
+        /* 'starttime' value is the 22nd field (man 5 proc_pid_stat) */
         if (current_field == 22)
         {
             return strtoull(token, NULL, 10);
@@ -217,6 +218,9 @@ int try_connect_daemon(const char *pid_file, pid_t *pid_daemon, int *fd_user_ns,
                 {
                     /*
                      * Fail: Start times do not match, pid was reused
+                     *
+                     * can happen e.g. if the daemon crashes and the pid was
+                     * reused for a new process
                      */
                     close(fd_user_ns_tmp);
                     close(fd_ipc_ns_tmp);
@@ -625,40 +629,56 @@ int main(int argc, char *argv[])
                     /* close inherited lock fd */
                     close(lock_fd);
 
+                    /*
+                     * Set command name of task
+                     *
+                     * See command name:
+                     * main thread: /proc/<pid>/comm (man 5 proc_pid_comm)
+                     * thread: /proc/<pid>/task/<tid>/comm
+                     * ps -o uid,pid,ppid,comm -p <pid>
+                     *
+                     * limited to TASK_COMM_LEN (16) characters including \0
+                     *
+                     *
+                     * Compared to:
+                     * ps -fp <pid>
+                     * ps -o args
+                     * ps -o cmd
+                     * these will use the command line arguments:
+                     * /proc/<pid>/cmdline
+                     * To change this, the name needs to be copied into argv[0]
+                     * but then the maximum length is determined by original
+                     * argv[0].
+                     */
+                    if (prctl(PR_SET_NAME, "unipc (daemon)", 0, 0, 0) == -1)
+                    {
+                        perror("prctl() failed");
+                        _exit(EXIT_FAILURE);
+                    }
+
                     if (setsid() < 0)
                     {
                         perror("setsid() failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     if (setns(survivor_fd_user_ns, CLONE_NEWUSER) != 0)
                     {
                         perror("Daemon failed to join user ns");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     if (setns(survivor_fd_ipc_ns, CLONE_NEWIPC) != 0)
                     {
                         perror("Daemon failed to join ipc ns");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
                     close(survivor_fd_user_ns);
                     close(survivor_fd_ipc_ns);
 
-                    unsigned long long starttime_daemon =
-                        get_process_starttime(getpid());
-                    char pid_file_content[128];
-                    snprintf(pid_file_content, sizeof(pid_file_content),
-                             "%d\n%llu\n", getpid(), starttime_daemon);
-                    if (write_file(pid_file, pid_file_content) != 0)
-                    {
-                        perror("Failed to write pid file");
-                        return EXIT_FAILURE;
-                    }
-
                     if (write(sync_pipe[1], "K", 1) != 1)
                     {
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
                     close(sync_pipe[1]);
 
@@ -666,7 +686,7 @@ int main(int argc, char *argv[])
                     {
                         pause();
                     }
-                    exit(EXIT_SUCCESS);
+                    _exit(EXIT_SUCCESS);
                 }
 
                 /* close write end */
@@ -685,6 +705,31 @@ int main(int argc, char *argv[])
                 close(sync_pipe[0]);
 
                 pid_daemon = pid_child;
+
+                unsigned long long starttime_daemon =
+                    get_process_starttime(pid_daemon);
+                if (starttime_daemon == 0)
+                {
+                    close(survivor_fd_user_ns);
+                    close(survivor_fd_ipc_ns);
+                    flock(lock_fd, LOCK_UN);
+                    close(lock_fd);
+                    return EXIT_FAILURE;
+                }
+
+                char pid_file_content[128];
+                snprintf(pid_file_content, sizeof(pid_file_content),
+                         "%d\n%llu\n", pid_daemon, starttime_daemon);
+                if (write_file(pid_file, pid_file_content) != 0)
+                {
+                    perror("Failed to write pid file");
+                    close(survivor_fd_user_ns);
+                    close(survivor_fd_ipc_ns);
+                    flock(lock_fd, LOCK_UN);
+                    close(lock_fd);
+                    return EXIT_FAILURE;
+                }
+
                 /*
                  * The daemon used the fds of the survivor to join those
                  * namespaces so they already reference the right namespaces.
@@ -727,16 +772,22 @@ int main(int argc, char *argv[])
                     /* close inherited lock fd */
                     close(lock_fd);
 
+                    if (prctl(PR_SET_NAME, "unipc (daemon)", 0, 0, 0) == -1)
+                    {
+                        perror("prctl() failed");
+                        _exit(EXIT_FAILURE);
+                    }
+
                     if (setsid() < 0)
                     {
                         perror("setsid() failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     if (unshare(CLONE_NEWUSER | CLONE_NEWIPC) != 0)
                     {
                         perror("unshare() failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     /*
@@ -755,7 +806,7 @@ int main(int argc, char *argv[])
                     if (map_current_user() != 0)
                     {
                         perror("Mapping of user failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     /*
@@ -773,7 +824,7 @@ int main(int argc, char *argv[])
                     if (len_daemon_user_ns_inum < 0)
                     {
                         perror("Reading user ns inum failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
                     ssize_t len_daemon_ipc_ns_inum =
                         readlink("/proc/self/ns/ipc", daemon_ipc_ns_inum,
@@ -781,26 +832,26 @@ int main(int argc, char *argv[])
                     if (len_daemon_ipc_ns_inum < 0)
                     {
                         perror("Reading ipc ns inum failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     if (write_file(user_ns_inum_file, daemon_user_ns_inum) != 0)
                     {
                         perror("Writing user ns inum file failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     if (write_file(ipc_ns_inum_file, daemon_ipc_ns_inum) != 0)
                     {
                         perror("Writing ipc ns inum file failed");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
 
                     /* Signal parent that namespace files are configured */
                     if (write(sync_pipe[1], "K", 1) != 1)
                     {
                         perror("Failed to notify parent");
-                        exit(EXIT_FAILURE);
+                        _exit(EXIT_FAILURE);
                     }
                     close(sync_pipe[1]);
 
@@ -811,7 +862,7 @@ int main(int argc, char *argv[])
                     {
                         pause();
                     }
-                    exit(EXIT_SUCCESS);
+                    _exit(EXIT_SUCCESS);
                 }
 
                 /* close write end */
@@ -846,6 +897,21 @@ int main(int argc, char *argv[])
                 }
                 close(sync_pipe[0]);
 
+                /*
+                 * Even if the daemon (child) dies directly after signalling
+                 * the parent, there is no risk that another unrelated process
+                 * on the system could reuse the pid so we would pin wrong
+                 * ns inums and write an invalid pid. That is because the child
+                 * becomes a zombie until the parent reads its exit status.
+                 * A zombie does not allocate resources like open fds anymore
+                 * but the kernel still stores metadata like the pid and exit
+                 * status and as long as the zombie exists, its pid will not be
+                 * reused. This parent never reads the exit status with wait()
+                 * or waitpid() so the child stays a zombie for the whole
+                 * lifetime of the parent. Only when the parent terminates, the
+                 * child is reparented to pid 1 which directly reads its exit
+                 * code to remove the zombie.
+                 */
                 pid_daemon = pid_child;
                 /*
                  * After syncing, we are sure that /proc/<daemon_pid>/ns/ files
@@ -873,6 +939,12 @@ int main(int argc, char *argv[])
 
                 unsigned long long starttime_daemon =
                     get_process_starttime(pid_daemon);
+                if (starttime_daemon == 0)
+                {
+                    flock(lock_fd, LOCK_UN);
+                    close(lock_fd);
+                    return EXIT_FAILURE;
+                }
 
                 char pid_file_content[128];
                 snprintf(pid_file_content, sizeof(pid_file_content),
@@ -931,7 +1003,7 @@ int main(int argc, char *argv[])
     /*
      * Avoid race condition with lock:
      *
-     * The lock, either SH or EX, is hold on purpose until registration the
+     * The lock, either SH or EX, is hold on purpose until registration of the
      * process finishes.
      *
      * Release before registration:
@@ -956,6 +1028,9 @@ int main(int argc, char *argv[])
     /*
      * "If a process with nonzero UID in this user namespace performs execve,
      * all its capabilities are cleared." (man 7 capabilities)
+     *
+     * So as long as we do not map to UID 0 in the new user namespace, the
+     * actual target program executes without capabilities in the new user ns.
      */
     execvp(argv[1], &argv[1]);
 
