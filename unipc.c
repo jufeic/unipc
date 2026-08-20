@@ -886,7 +886,7 @@ int main(int argc, char *argv[])
                      */
                     if (map_current_user() != 0)
                     {
-                        perror("Mapping of user failed");
+                        fprintf(stderr, "Mapping of user failed\n");
                         _exit(EXIT_FAILURE);
                     }
 
@@ -995,7 +995,7 @@ int main(int argc, char *argv[])
                  * or waitpid() so the child stays a zombie for the whole
                  * lifetime of the parent. Only when the parent terminates, the
                  * child is reparented to pid 1 which directly reads its exit
-                 * code to remove the zombie.
+                 * code to remove the zombie. (state Z: man 1 ps)
                  */
                 pid_daemon = pid_child;
                 /*
