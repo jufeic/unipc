@@ -16,6 +16,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#define RUNTIME_DIR_MAX (PATH_MAX - 128)
+
 int write_file(const char *path, const char *content)
 {
     /*
@@ -421,7 +423,7 @@ int main(int argc, char *argv[])
 
     const char *ns_group = "global";
 
-    char runtime_dir[PATH_MAX];
+    char runtime_dir[RUNTIME_DIR_MAX];
     const char *xdg_runtime = getenv("XDG_RUNTIME_DIR");
 
     /*
@@ -432,7 +434,7 @@ int main(int argc, char *argv[])
      * and wiped on reboot.
      */
     if (xdg_runtime && xdg_runtime[0] != '\0' &&
-        strlen(xdg_runtime) < (PATH_MAX - 128))
+        strlen(xdg_runtime) < (sizeof(runtime_dir) - 16))
     {
         snprintf(runtime_dir, sizeof(runtime_dir), "%s/unipc", xdg_runtime);
     }
