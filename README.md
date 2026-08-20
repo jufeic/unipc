@@ -38,6 +38,7 @@ The unipc namespaces are completely isolated from other users on the system.
 This allows processes running in unipc namespaces to have an isolated view on the
 System V IPC resources shared memory, message queues and semaphores and on
 POSIX message queues.
+
 Processes running in unipc namespaces still share the resources governed by the other 6
 namespaces in Linux. By default, namespaces are destroyed when the last process
 inside terminates. To prevent that, unipc runs a daemon process inside of the unipc namespaces
