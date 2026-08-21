@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,39 @@
 #include <unistd.h>
 
 #define RUNTIME_DIR_MAX (PATH_MAX - 128)
+
+/*
+ * The kernel hardcodes the initial namespace inodes. Starting with Linux
+ * 6.17 and commit 6a9e2fb1bab53b54d02714a2ee3c6612d19629ce, the values are part
+ * of the UAPI (see include/uapi/linux/nsfs.h) and therefore stable. Still use
+ * custom defines to allow compilation with headers of older kernels.
+ */
+#define UNIPC_USER_NS_INIT_INO (0xEFFFFFFDU)
+#define UNIPC_IPC_NS_INIT_INO  (0xEFFFFFFFU)
+
+bool is_initial_user_ns(void)
+{
+    struct stat st;
+    if (stat("/proc/self/ns/user", &st) != 0)
+    {
+        perror("stat() failed");
+        return false;
+    }
+
+    return (st.st_ino == UNIPC_USER_NS_INIT_INO);
+}
+
+bool is_initial_ipc_ns(void)
+{
+    struct stat st;
+    if (stat("/proc/self/ns/ipc", &st) != 0)
+    {
+        perror("stat() failed");
+        return false;
+    }
+
+    return (st.st_ino == UNIPC_IPC_NS_INIT_INO);
+}
 
 int write_file(const char *path, const char *content)
 {
@@ -604,24 +638,37 @@ int main(int argc, char *argv[])
     /*
      * Safety restriction:
      *
+     * Allow unipc processes only from initial user and ipc namespaces or
+     * from the unipc namespaces (checked before).
+     *
      * Even though I think its possible to run unipc inside nested user
      * namespaces, this use case is not tested enough to fully trust it at the
      * moment.
+     *
+     *
+     * Implementation:
+     * Comparison with the hardcoded initial namespace inode values.
+     *
+     *
+     * Alternatives (not working):
+     * Comparison with the inode values of pid 1 (/proc/1/ns/ ) is not possible
+     * because they cannot be accessed unprivileged.
+     *
+     * Parsing /proc/self/uid_map and comparing with "0 0 4294967295" (man 7
+     * user_namespaces) is also not possible because such a mapping / user ns
+     * definition can also be valid for a non-initial user ns (see
+     * https://github.com/containers/crun/issues/2150).
+     *
+     * Using ioctl (man 2 ioctl_ns) with NS_GET_PARENT operation to check if
+     * current user ns has a parent user ns. If not (initial user ns), check
+     * with NS_GET_USERNS operation if current ipc ns is owned by the current
+     * user ns (then its initial ipc ns). ioctl returns EPERM on attempt to
+     * obtain the parent of the initial user ns. But the problem is that it also
+     * returns EPERM if the parent user ns is outside of the namespace scope
+     * of the unipc process, e.g. if the unipc process is running in a child
+     * user ns.
      */
-    char initial_user_ns_inum[256] = {0};
-    char initial_ipc_ns_inum[256] = {0};
-    ssize_t len_initial_user_ns_inum =
-        readlink("/proc/1/ns/user", initial_user_ns_inum,
-                 sizeof(initial_user_ns_inum) - 1);
-    ssize_t len_initial_ipc_ns_inum = readlink(
-        "/proc/1/ns/ipc", initial_ipc_ns_inum, sizeof(initial_ipc_ns_inum) - 1);
-    if (len_initial_user_ns_inum <= 0 || len_initial_ipc_ns_inum <= 0)
-    {
-        fprintf(stderr, "Failed to determine initial namespace inums\n");
-        return EXIT_FAILURE;
-    }
-    else if (strcmp(current_user_ns_inum, initial_user_ns_inum) != 0 ||
-             strcmp(current_ipc_ns_inum, initial_ipc_ns_inum) != 0)
+    if (!is_initial_user_ns() || !is_initial_ipc_ns())
     {
         fprintf(stderr,
                 "Executing unipc from a user or ipc namespace different from "
