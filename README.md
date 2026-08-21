@@ -20,14 +20,9 @@ make install PREFIX=$HOME/.local
 ```
 
 ## Usage
-
 All programs started with the unipc wrapper are running in the same isolated IPC namespace:
 ```bash
 unipc <program> [args...]
-```
-Create a shell process to execute commands directly in the unipc namespaces:
-```bash
-unipc bash
 ```
 
 ## Overview
@@ -45,3 +40,17 @@ inside terminates. To prevent that, unipc runs a daemon process inside of the un
 to keep them alive. unipc processes join the user and IPC namespace of the daemon and
 then execute the specified program.
 
+## Limitation
+There is a limitation of the current implementation when the daemon process is killed.
+In such case there is a potential risk that processes started inside a unipc-wrapped shell
+continue to run in the old unipc namespaces but a new daemon creates new unipc
+namespaces. This is only a problem for long-running processes like servers or daemons.
+For such processes, avoid starting them without the unipc wrapper:
+```bash
+unipc bash
+$ server
+```
+That is because unipc internally tracks all processes started with unipc but
+it is not possible for unipc to track processes that were not started with the unipc wrapper.
+unipc processes are not affected and a new daemon will join the unipc namespaces of any
+surviving unipc process.
