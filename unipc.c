@@ -71,12 +71,10 @@ int write_file(const char *path, const char *content)
     return (written == (ssize_t)len) ? 0 : -1;
 }
 
-int map_current_user()
+int map_current_user(uid_t uid, gid_t gid)
 {
     int rc;
     char map[128];
-    uid_t uid = getuid();
-    gid_t gid = getgid();
 
     rc = -1;
 
@@ -918,6 +916,18 @@ int main(int argc, char *argv[])
                         _exit(EXIT_FAILURE);
                     }
 
+                    /*
+                     * Capture the UID/GID before calling unshare(). That is
+                     * because the kernel returns the overflow UID/GID for
+                     * unmapped users (/proc/sys/kernel/overflow[u,g]id).
+                     * And in a new user namespace before writing uid_map, every
+                     * UID/GID is unmapped so we lose the ability to query the
+                     * UID/GID which is necessary to write the user namespace
+                     * definition into uid_map (see man 7 user_namespaces).
+                     */
+                    uid_t uid = getuid();
+                    gid_t gid = getgid();
+
                     if (unshare(CLONE_NEWUSER | CLONE_NEWIPC) != 0)
                     {
                         perror("unshare() failed");
@@ -937,7 +947,7 @@ int main(int argc, char *argv[])
                      * EUID as process that created the user ns and do deny the
                      * use of the setgroups() syscall.
                      */
-                    if (map_current_user() != 0)
+                    if (map_current_user(uid, gid) != 0)
                     {
                         fprintf(stderr, "Mapping of user failed\n");
                         _exit(EXIT_FAILURE);
