@@ -811,7 +811,7 @@ int main(int argc, char *argv[])
 
                     while (1)
                     {
-                        sleep(300);
+                        sleep(120);
                         cleanup_processes(processes_dir);
                     }
                     _exit(EXIT_SUCCESS);
@@ -997,13 +997,13 @@ int main(int argc, char *argv[])
 
                     /*
                      * Sleep forever in the kernel holding the namespaces open.
-                     * Do cleanup in 5 minute interval to ensure the directory
+                     * Do cleanup in 2 minute interval to ensure the directory
                      * is cleaned up and no unipc process needs to do cleanup
                      * logic as overhead (except the daemon itself is down).
                      */
                     while (1)
                     {
-                        sleep(300);
+                        sleep(120);
                         cleanup_processes(processes_dir);
                     }
                     _exit(EXIT_SUCCESS);
