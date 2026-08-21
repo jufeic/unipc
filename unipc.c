@@ -673,6 +673,8 @@ int main(int argc, char *argv[])
         fprintf(stderr,
                 "Executing unipc from a user or ipc namespace different from "
                 "the initial or unipc namespaces is currently not supported\n");
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
         return EXIT_FAILURE;
     }
 
