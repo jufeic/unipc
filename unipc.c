@@ -55,8 +55,8 @@ bool is_initial_ipc_ns(void)
 int write_file(const char *path, const char *content)
 {
     /*
-     * 0600 when creating new files, e.g. daemon_global.pid and
-     * user_ns_global.inum
+     * 0600 when creating new files, e.g. daemon.pid and
+     * user_ns.inum
      */
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0)
@@ -453,8 +453,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    const char *ns_group = "global";
-
     char runtime_dir[RUNTIME_DIR_MAX];
     const char *xdg_runtime = getenv("XDG_RUNTIME_DIR");
 
@@ -511,14 +509,12 @@ int main(int argc, char *argv[])
     char user_ns_inum_file[PATH_MAX];
     char ipc_ns_inum_file[PATH_MAX];
     char lock_file[PATH_MAX];
-    snprintf(pid_file, sizeof(pid_file), "%s/daemon_%s.pid", runtime_dir,
-             ns_group);
-    snprintf(user_ns_inum_file, sizeof(user_ns_inum_file), "%s/user_ns_%s.inum",
-             runtime_dir, ns_group);
-    snprintf(ipc_ns_inum_file, sizeof(ipc_ns_inum_file), "%s/ipc_ns_%s.inum",
-             runtime_dir, ns_group);
-    snprintf(lock_file, sizeof(lock_file), "%s/unipc_%s.lock", runtime_dir,
-             ns_group);
+    snprintf(pid_file, sizeof(pid_file), "%s/daemon.pid", runtime_dir);
+    snprintf(user_ns_inum_file, sizeof(user_ns_inum_file), "%s/user_ns.inum",
+             runtime_dir);
+    snprintf(ipc_ns_inum_file, sizeof(ipc_ns_inum_file), "%s/ipc_ns.inum",
+             runtime_dir);
+    snprintf(lock_file, sizeof(lock_file), "%s/unipc.lock", runtime_dir);
 
     /*
      * FAST PATH:
