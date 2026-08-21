@@ -43,8 +43,10 @@ then execute the specified program.
 ## Limitation
 There is a limitation of the current implementation when the daemon process is killed.
 In such case there is a potential risk that processes started inside a unipc-wrapped shell
-continue to run in the old unipc namespaces but a new daemon creates new unipc
-namespaces. This is only a problem for long-running processes like servers or daemons.
+continue to run in the old unipc namespaces.
+The problem only comes up if there is no unipc process still running when the
+new daemon starts because in that case it will create new unipc namespaces.
+This issue is only relevant for long-running processes like servers or daemons.
 For such processes, avoid starting them without the unipc wrapper:
 ```bash
 unipc bash
@@ -52,5 +54,5 @@ $ server
 ```
 That is because unipc internally tracks all processes started with unipc but
 it is not possible for unipc to track processes that were not started with the unipc wrapper.
-unipc processes are not affected and a new daemon will join the unipc namespaces of any
+unipc processes are not affected if the daemon is killed because a new daemon will join the unipc namespaces of any
 surviving unipc process.
