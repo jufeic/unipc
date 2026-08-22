@@ -445,6 +445,189 @@ void cleanup_processes(const char *processes_dir)
     closedir(dir);
 }
 
+void unipc_shell(int lock_fd, const char *processes_dir)
+{
+    char cmdline[2048];
+    char *args[64];
+
+    /* unipc shell should ignore <C-c> (SIGINT) */
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    while (1)
+    {
+        printf("unipc> ");
+        fflush(stdout);
+
+        /* Exit on <C-d> */
+        if (fgets(cmdline, sizeof(cmdline), stdin) == NULL)
+        {
+            printf("\n");
+            break;
+        }
+
+        /* Replace trailing newline with \0 */
+        cmdline[strcspn(cmdline, "\n")] = '\0';
+
+        int i = 0;
+        char *token = strtok(cmdline, " \t");
+        while (token != NULL && i < 63)
+        {
+            args[i++] = token;
+            token = strtok(NULL, " \t");
+        }
+        args[i] = NULL;
+
+        /* Skip empty input */
+        if (i == 0)
+        {
+            continue;
+        }
+
+        /* Exit unipc shell */
+        if (strcmp(args[0], "exit") == 0)
+        {
+            break;
+        }
+
+        /* Basic cd */
+        if (strcmp(args[0], "cd") == 0)
+        {
+            if (args[1] == NULL)
+            {
+                fprintf(stderr, "unipc shell: cd requires a directory\n");
+            }
+            else if (chdir(args[1]) != 0)
+            {
+                perror("unipc shell: cd failed");
+            }
+            continue;
+        }
+
+        /* Export env var */
+        if (strcmp(args[0], "export") == 0)
+        {
+            if (args[1] == NULL)
+            {
+                fprintf(stderr, "unipc shell: export requires VAR=VALUE\n");
+            }
+            else
+            {
+                /* Search the '=' character in the argument */
+                char *eq = strchr(args[1], '=');
+                if (eq != NULL)
+                {
+                    /* Replace '=' with '\0' to split argument */
+                    *eq = '\0';
+                    char *key = args[1];
+                    char *val = eq + 1;
+
+                    if (setenv(key, val, 1) != 0)
+                    {
+                        perror("unipc shell: export failed");
+                    }
+                }
+                else
+                {
+                    fprintf(stderr,
+                            "unipc shell: export format must be VAR=VALUE\n");
+                }
+            }
+            continue;
+        }
+
+        if (flock(lock_fd, LOCK_SH) != 0)
+        {
+            fprintf(stderr, "unipc shell: Could not acquire lock file\n");
+            continue;
+        }
+
+        int sync_pipe[2];
+        if (pipe2(sync_pipe, O_CLOEXEC) != 0)
+        {
+            perror("unipc shell: pipe2() failed");
+            flock(lock_fd, LOCK_UN);
+            continue;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("unipc shell: fork failed");
+            flock(lock_fd, LOCK_UN);
+            continue;
+        }
+
+        if (pid == 0)
+        {
+            /* close read end */
+            close(sync_pipe[0]);
+            /* close inherited lock fd */
+            close(lock_fd);
+
+            /*
+             * The child inherits the defined signal handler to ignore SIGINT.
+             * Restore default <C-c> behavior for the command.
+             */
+            struct sigaction sa_child;
+            sa_child.sa_handler = SIG_DFL;
+            sigemptyset(&sa_child.sa_mask);
+            sa_child.sa_flags = 0;
+            sigaction(SIGINT, &sa_child, NULL);
+
+            if (register_current_process(processes_dir) != 0)
+            {
+                fprintf(stderr, "unipc shell: Failed to register process\n");
+                _exit(EXIT_FAILURE);
+            }
+
+            if (write(sync_pipe[1], "K", 1) != 1)
+            {
+                _exit(EXIT_FAILURE);
+            }
+            close(sync_pipe[1]);
+
+            execvp(args[0], &args[0]);
+            perror("unipc shell: command failed");
+            _exit(EXIT_FAILURE);
+        }
+
+        /* close write end */
+        close(sync_pipe[1]);
+
+        char ready_signal;
+        if (read(sync_pipe[0], &ready_signal, 1) <= 0)
+        {
+            perror("unipc shell: child sync failed");
+            close(sync_pipe[0]);
+            flock(lock_fd, LOCK_UN);
+            continue;
+        }
+        close(sync_pipe[0]);
+
+        flock(lock_fd, LOCK_UN);
+
+        int status;
+        /* Keep waiting if interrupted by a signal we do not ignore */
+        while (waitpid(pid, &status, 0) == -1)
+        {
+            if (errno != EINTR)
+            {
+                perror("unipc shell: waitpid failed");
+                break;
+            }
+        }
+
+        if (WIFSIGNALED(status))
+        {
+            printf("command terminated by signal %d\n", WTERMSIG(status));
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -608,12 +791,19 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
+            flock(lock_fd, LOCK_UN);
+
+            if (strcmp(argv[1], "shell") == 0)
+            {
+                unipc_shell(lock_fd, processes_dir);
+                close(lock_fd);
+                return EXIT_SUCCESS;
+            }
+
             /*
              * O_CLOEXEC ensures lock_fd is closed on exec but make it explicit
              */
-            flock(lock_fd, LOCK_UN);
             close(lock_fd);
-
             execvp(argv[1], &argv[1]);
 
             perror("execvp (Fast path failed)");
@@ -1167,6 +1357,14 @@ int main(int argc, char *argv[])
      * B will spawn a new daemon which will join the namespaces of A.
      */
     flock(lock_fd, LOCK_UN);
+
+    if (strcmp(argv[1], "shell") == 0)
+    {
+        unipc_shell(lock_fd, processes_dir);
+        close(lock_fd);
+        return EXIT_SUCCESS;
+    }
+
     close(lock_fd);
 
     /*
