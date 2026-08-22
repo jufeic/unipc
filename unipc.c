@@ -15,6 +15,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define RUNTIME_DIR_MAX (PATH_MAX - 128)
