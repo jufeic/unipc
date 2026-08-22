@@ -24,6 +24,12 @@ All programs started with the unipc wrapper are running in the same isolated IPC
 ```bash
 unipc <program> [args...]
 ```
+To run commands directly in the isolated IPC namespace in a shell-like interface
+without having to explicitly wrap commands with unipc:
+```bash
+unipc shell
+unipc> <program> [args...]
+```
 
 ## Overview
 unipc allows to execute programs in a separate IPC namespace. To be exact, the
@@ -55,4 +61,7 @@ $ server
 That is because unipc internally tracks all processes started with unipc but
 it is not possible for unipc to track processes that were not started with the unipc wrapper.
 unipc processes are not affected if the daemon is killed because a new daemon will join the unipc namespaces of any
-surviving unipc process.
+surviving unipc process. To avoid problems with the mentioned limitation, it is
+recommended to use the built-in shell mode of unipc for ad-hoc commands in case
+you do not want to wrap each command with unipc explicitly (see [Usage](#usage)).
+
