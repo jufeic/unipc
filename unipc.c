@@ -190,7 +190,14 @@ int register_current_process(const char *processes_dir)
     int fd = open(process_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0)
     {
-        return -1;
+        /*
+         * If a program is started with unipc wrapper inside unipc shell, the
+         * child process already registered before executing unipc in the
+         * same process. unipc attempts to register itself in the fast path but
+         * it is the same process so we can ignore an already existing entry in
+         * the process list.
+         */
+        return (errno == EEXIST) ? 0 : -1;
     }
     close(fd);
 
@@ -664,7 +671,7 @@ int main(int argc, char *argv[])
     }
 
     char processes_dir[PATH_MAX];
-    snprintf(processes_dir, sizeof(processes_dir), "%s/processes", runtime_dir);
+    snprintf(processes_dir, sizeof(processes_dir), "%s/proc", runtime_dir);
     if (mkdir(processes_dir, 0700) != 0 && errno != EEXIST)
     {
         perror("Failed to create unipc processes directory");
